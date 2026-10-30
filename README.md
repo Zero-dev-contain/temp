@@ -1,37 +1,50 @@
-# Eidolon Secure Proxy
+# Eidolon — Secure Transport for Company Infrastructure
 
+[![Status](https://img.shields.io/badge/status-alpha-yellow.svg)](#project-status)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/sagernet/sing-box)
 [![Go Version](https://img.shields.io/badge/go-1.26+-blue.svg)](https://golang.org)
 [![Core Engine](https://img.shields.io/badge/engine-Chromium%20Net%20%7C%20BoringSSL-red.svg)](https://chromium.googlesource.com/chromium/src/net/)
-[![Crypto](https://img.shields.io/badge/crypto-ChaCha20--Poly1305%20%7C%20X25519Kyber768-orange.svg)](https://tools.ietf.org/html/rfc8439)
+[![Carrier](https://img.shields.io/badge/carrier-MoQT%20%2F%20WebTransport--over--H3-purple.svg)](https://datatracker.ietf.org/wg/moq/about/)
+[![Crypto](https://img.shields.io/badge/crypto-ChaCha20--Poly1305%20%7C%20AES--GCM%20%7C%20Hybrid--PQC-orange.svg)](https://tools.ietf.org/html/rfc8439)
 [![License](https://img.shields.io/badge/license-GPLv3-lightgrey.svg)](LICENSE)
 [![CGO](https://img.shields.io/badge/CGO-enabled-success.svg)](#prerequisites)
 
-> <small style="color: #6c757d;">*^ Note on nomenclature: While functional, this protocol could arguably be dubbed a "bootleg" implementation—it doesn't invent anything groundbreaking, but merely weaves together already proven concepts.*</small>
+**Eidolon** is a secure, MITM-resistant transport for connecting company infrastructure over hostile or untrusted networks, built on a high-performance fork of [sing-box](https://github.com/SagerNet/sing-box). Its purpose is a hardened, authenticated, end-to-end-encrypted channel between client and server — one that an on-path adversary cannot read, splice, impersonate, or replay. To achieve browser-grade transport security without the subtle discrepancies of emulated stacks, Eidolon natively embeds Google Chromium's actual network stack (`net/`, BoringSSL, and Chromium QUIC/HTTP-3) via a high-throughput CGO/C++ bridge, and carries tunnel traffic as **real MoQT (Media over QUIC Transport) over WebTransport-over-HTTP/3**.
 
-**Eidolon** is an enterprise-grade, next-generation stealth proxy protocol integrated into a high-performance fork of [sing-box](https://github.com/SagerNet/sing-box). Designed to survive state-of-the-art Deep Packet Inspection (DPI), active scanning, and machine learning traffic classifiers, Eidolon abandons superficial protocol simulation. Instead, it natively embeds Google Chromium's actual network stack (`net/`, BoringSSL, and Chromium QUIC/HTTP-3) via a high-throughput CGO/C++ bridge. 
+The security core is a **context-bound token handshake** that binds authentication to the session's ephemeral key material (defeating MITM key substitution and replay), an **independent inner AEAD layer** keyed from an RFC 5705 session exporter (so even a terminating front-end or a spoofed decoy cannot read the payload), and a **QUIC-native data plane** — reliable MoQT tracks for stream flows, QUIC datagrams with application-layer FEC for loss-tolerant flows, plus connection migration for seamless network handover.
 
-By combining authentic browser TLS/QUIC stacks with a context-bound TOTP authentication handshake, zero-delay transparent decoy fallback, dynamic DASH/HLS burst shaping, post-quantum hybrid cryptography, and dual-lane multi-path multiplexing, Eidolon renders proxy traffic mathematically and behaviorally indistinguishable from standard HTTPS and HTTP/3 browsing sessions.
+Eidolon is also censorship- and DPI-resistant — authentic Chromium TLS/QUIC fingerprints, a zero-delay transparent decoy fallback for active probes, and an on-demand media cover service — but in this first stage that camouflage is deliberately kept low-profile rather than advertised. There is little sense in parading an armored vehicle a mile off; the stealth machinery is present and engaged, not on display.
+
+> <small style="color: #6c757d;">*Note on nomenclature: the alpha doesn't invent anything groundbreaking — it weaves together already-proven concepts (authentic browser stacks, MoQT, exporter-bound AEAD, FEC) into one hardened channel. The next stage carries that idea in its name: **Weaver**.*</small>
+
+---
+
+## Project Status
+
+**Eidolon (alpha).** The transport basis is complete and validated end-to-end: authentic Chromium carrier, MoQT data plane (reliable tracks + datagrams + app-layer FEC), context-bound authentication, inner AEAD, connection racing/migration, sleep/wake keep-alive, and the on-demand cover service. This is the foundation layer — a working, MITM-resistant secure channel.
+
+**Next: Eidolon Weaver.** The follow-on stage adapts this basis to real company infrastructure — multi-node server topologies, key/secret lifecycle and federation at scale, operational tooling, and fleet management. Weaver is where the server-side work for production company deployments lands; it builds on the alpha, it does not replace it.
 
 ---
 
 ## Table of Contents
 
+- [Project Status](#project-status)
 - [Description & Threat Model](#description--threat-model)
-  - [The Circumvention Dilemma](#the-circumvention-dilemma)
+  - [The Secure-Channel Problem](#the-secure-channel-problem)
   - [Threat Model & Mitigations](#threat-model--mitigations)
   - [Comparative Protocol Matrix](#comparative-protocol-matrix)
 - [Key Features](#key-features)
-  - [Protocol & Cryptography](#protocol--cryptography)
-  - [Camouflage & Anti-Censorship](#camouflage--anti-censorship)
-  - [Performance & Multiplexing](#performance--multiplexing)
+  - [Secure Channel & Cryptography (core)](#secure-channel--cryptography-core)
+  - [Transport & Resilience](#transport--resilience)
+  - [Camouflage & Anti-Censorship (engaged, understated)](#camouflage--anti-censorship-engaged-understated)
   - [Deployment & Operational Modes](#deployment--operational-modes)
 - [Architecture & Technical Design](#architecture--technical-design)
   - [High-Level Data Flow](#high-level-data-flow)
   - [Wire Protocol & Packet Specifications](#wire-protocol--packet-specifications)
   - [Cryptographic State Machine](#cryptographic-state-machine)
   - [Camouflage & DPI Evasion Subsystems](#camouflage--dpi-evasion-subsystems)
-  - [Multi-Lane Hybrid Multiplexer (TCP + QUIC)](#multi-lane-hybrid-multiplexer-tcp--quic)
+  - [Hybrid Multiplexer (QUIC-preferred MoQT + TCP fallback)](#hybrid-multiplexer-quic-preferred-moqt--tcp-fallback)
   - [Caddy Shield Reverse Proxy Fronting](#caddy-shield-reverse-proxy-fronting)
 - [Configuration Guide](#configuration-guide)
   - [Inbound Configuration Options](#inbound-configuration-options)
@@ -58,16 +71,23 @@ By combining authentic browser TLS/QUIC stacks with a context-bound TOTP authent
 
 ## Description & Threat Model
 
-### The Circumvention Dilemma
+### The Secure-Channel Problem
 
-Modern censorship infrastructure has evolved beyond simple IP blacklists, DNS poisoning, and static SNI blocking. Advanced network adversaries employ:
+Eidolon's primary job is to carry a company's traffic between endpoints that sit on networks nobody controls — public internet, hostile ISPs, shared corporate Wi-Fi, mobile carriers. The adversary assumed is **on-path and active**: able to observe, inject, reset, redirect, and replay. The channel must therefore be:
 
-1. **Active Probing**: Autonomous scanning clusters replay intercepted handshakes or issue probe variations against suspected proxy endpoints to trigger distinct protocol responses, abnormal TCP resets, or customized TLS alert codes.
-2. **TLS ClientHello Fingerprinting (JA3 / JA4)**: Censorship middleboxes calculate hashes of TLS extensions, cipher suites, elliptic curves, point formats, and ALPN tokens. Emulated implementations (such as Go `crypto/tls` or patched libraries) inevitably exhibit subtle discrepancies (e.g. extension ordering, GREASE values, signature algorithms) that reveal non-browser clients.
-3. **HTTP/2 & HTTP/3 Preambles & SETTINGS Fingerprinting**: Inconsistencies in initial window sizes, header table sizes, max concurrent streams, or frame interleaving expose emulated HTTP/2 or HTTP/3 layers.
-4. **Traffic Analysis & Website Fingerprinting (WF)**: Machine learning classifiers (e.g. Deep Fingerprinting, k-FP, CUMUL) analyze packet direction, inter-arrival timing jitter, and cumulative packet size distributions. Even over TLS, unshaped proxy sessions leak distinct packet size patterns (e.g., small interactive handshakes followed by immediate streaming bursts).
+1. **Confidential end-to-end** — readable only by the two endpoints, never by a terminating proxy, a TLS-intercepting middlebox, or a decoy the adversary stands up.
+2. **MITM-resistant** — an attacker who records and replays a legitimate handshake, or who substitutes their own key material, must not be able to establish or hijack a session.
+3. **Replay-proof and side-channel-hardened** — captured authenticators are single-use and time-bound, and validation leaks no timing information.
+4. **Resilient** — it survives UDP blackholing, network handover (Wi-Fi↔cellular), and idle/sleep without tearing down the session or leaking a correlatable signature.
 
-Eidolon was engineered from the ground up to neutralize every vector in this threat model.
+As a secondary property, the channel is also **indistinguishable from ordinary web traffic**, because the same active adversary frequently also performs traffic classification and will block what it can identify. Modern inspection goes well beyond IP blacklists and static SNI blocking:
+
+1. **Active Probing**: Autonomous scanning clusters replay intercepted handshakes or issue probe variations against suspected endpoints to trigger distinct protocol responses, abnormal TCP resets, or customized TLS alert codes.
+2. **TLS ClientHello Fingerprinting (JA3 / JA4)**: Middleboxes hash TLS extensions, cipher suites, curves, point formats, and ALPN tokens. Emulated stacks (Go `crypto/tls` or patched libraries) exhibit subtle discrepancies — extension ordering, GREASE values, signature algorithms — that reveal non-browser clients.
+3. **HTTP/2 & HTTP/3 / QUIC Fingerprinting**: Inconsistencies in initial window sizes, header-table sizes, max concurrent streams, QUIC transport parameters, or frame interleaving expose emulated HTTP layers.
+4. **Traffic Analysis & Website Fingerprinting (WF)**: ML classifiers (Deep Fingerprinting, k-FP, CUMUL) analyze packet direction, inter-arrival jitter, and cumulative size distributions. Even over TLS, unshaped sessions leak distinct patterns.
+
+Eidolon neutralizes the confidentiality/MITM threats as its core guarantee, and treats the fingerprinting vectors as a camouflage layer that — per the project's current stage — stays engaged but understated.
 
 ### Threat Model & Mitigations
 
@@ -107,52 +127,54 @@ Eidolon was engineered from the ground up to neutralize every vector in this thr
 
 | Feature | Shadowsocks (2022) | Trojan / Trojan-Go | VMess / VLESS | Xray REALITY | NaïveProxy | **Eidolon** |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **TLS Stack** | None (Raw AEAD) | Go `crypto/tls` | Go / uTLS | Go / uTLS | Chromium Net Stack | **Chromium Net Stack (`libeidolon.so`)** |
+| **TLS / QUIC Stack** | None (Raw AEAD) | Go `crypto/tls` | Go / uTLS | Go / uTLS | Chromium Net Stack | **Chromium Net Stack (`libeidolon.so`)** |
+| **Tunnel Carrier** | Raw TCP | TLS stream | TCP / mKCP / WS | TLS stream | HTTP/2 CONNECT | **Real MoQT over WebTransport-over-H3** |
 | **Active Probing Defense** | None (Drop/RST) | Decoy Website | Decoy Website | Decoy TLS Splice | Frontend Forwarding (Caddy) | **Zero-Delay Fallback & Caddy Shield** |
-| **Authentication Placement**| Initial Salt / Header | TLS Password (Body) | Header / Addons | TLS ClientHello SessionID | HTTP Authorization Header | **SessionID + Ephemeral KeyShare Binding** |
-| **KeyShare Substitution Defense**| N/A | No | No | No | N/A | **Yes (HMAC binds Client KeyShare)** |
+| **Authentication Placement**| Initial Salt / Header | TLS Password (Body) | Header / Addons | TLS ClientHello SessionID | HTTP Authorization Header | **In-band carrier preamble (QUIC); SessionID on TCP fallback**|
+| **MITM / KeyShare Substitution Defense**| N/A | No | No | No | N/A | **Yes (token binds client ephemeral KeyShare)** |
 | **Timing Side-Channel Immunity** | Partial | No | No | Partial | High | **Yes (Full constant-time + dummy cache)** |
-| **Multiplexing Layer** | smux / none | None / smux | Mux.Cool / smux | None / Mux | HTTP/2 Streams | **Dual-Lane Hybrid (TCP smux + QUIC Pool)**|
-| **Multi-Path / Degradation** | No | No | No | No | No | **Yes (Auto-healing TCP/QUIC failover)** |
-| **Traffic Shaping / Chaffing**| None | None | None | None | First 8 reads/writes padding | **BurstShaper (1-4MB) + Adaptive Chaff (15%)**|
-| **Post-Quantum Cryptography**| None | None | Experimental | Limited | Dependent on Chrome | **Native X25519Kyber768 (`0x6399`)** |
+| **Data Plane** | Stream | Stream | Stream | Stream | HTTP/2 Streams | **MoQT reliable tracks + QUIC datagrams (RFC 9221) + app-layer FEC**|
+| **Transport Selection** | Single | Single | Single | Single | Single | **QUIC-preferred racing + TCP (smux) fallback (Happy-Eyeballs)**|
+| **Network Handover** | No | No | No | No | No | **Yes (QUIC connection migration, Wi-Fi↔cellular)** |
+| **Traffic Shaping / Chaffing**| None | None | None | None | First 8 reads/writes padding | **PaddedConn + Adaptive Chaff; DASH/HLS BurstShaper on fallback**|
+| **Post-Quantum Cryptography**| None | None | Experimental | Limited | Dependent on Chrome | **Chromium-native hybrid (X25519 + ML-KEM/Kyber)** |
 | **Deployment Flexibility** | Standalone | Web Server | Web Server | Standalone | Caddy Plugin | **Self-Hosted TLS, Decoy Fallback, Caddy Shield**|
 
 ---
 
 ## Key Features
 
-### Protocol & Cryptography
+### Secure Channel & Cryptography (core)
 
-- **Authentic Chromium Network Stack**: Employs real Chromium networking primitives via `libeidolon.so` (built against BoringSSL and Chromium QUIC). Eliminates all heuristic and JA3/JA4 fingerprinting discrepancies.
-- **Context-Bound Ephemeral Token Authentication**: Generates a 32-byte HMAC-SHA256 token embedded in the TLS 1.3 `SessionId` field. The token cryptographically binds the current time window ($\pm 5\text{s}$) with the client's ephemeral TLS KeyShare (`0x0033` extension), preventing MITM replay attacks and key substitution.
-- **RFC 5705 Keying Material Exporter**: Inner encryption keys are derived directly from the established TLS or QUIC session using RFC 5705 exporter labels (`"eidolon-traffic-key"`). Man-in-the-Middle interceptors or spoofed decoys cannot decrypt payload streams.
-- **Independent Inner AEAD Layer**: Inner bidirectional streams are encapsulated in ChaCha20-Poly1305 (IETF RFC 8439) with HKDF-SHA256 key derivation, independent sequence counters, and explicit framing.
-- **Post-Quantum Hybrid Key Exchange**: Native support for hybrid post-quantum key agreement (`X25519Kyber768` / `0x6399`), providing quantum resistance with automatic graceful fallback to classical X25519.
-- **Constant-Time Verification**: Server-side token validation executes across all three time windows ($[-1, 0, +1]$) using `subtle.ConstantTimeCompare`, paired with symmetrical dummy cache lookups to eliminate microarchitectural timing leaks.
+- **Authentic Chromium Network Stack**: Real Chromium networking primitives via `libeidolon.so` (BoringSSL + Chromium QUIC/HTTP-3), so the transport-security properties and the on-wire fingerprint are a browser's, not an emulation's.
+- **Context-Bound Ephemeral Token Authentication (anti-MITM)**: A 32-byte HMAC-SHA256 token cryptographically binds the current time window ($\pm 5\text{s}$) to the session's **ephemeral key material**. An adversary who records and replays a handshake, or substitutes their own key material, cannot authenticate — the token is valid only for the key it was bound to. The binding is per-lane: the QUIC/MoQT carrier carries the token **in-band** in the authenticated track preamble, channel-bound to the session's RFC 5705 exporter (both the reliable and datagram lanes); the TCP-fallback lane binds it over the TLS `key_share` natively (BoringSSL) in the `SessionId` field. A double-terminating MITM holds a *different* per-leg exporter and cannot forge a token for the server leg without the pre-shared secret.
+- **RFC 5705 Keying Material Exporter (anti-decoy / anti-intercept)**: Inner keys are derived from the established TLS/QUIC session via RFC 5705 exporter labels (`"eidolon-traffic-key"`). A terminating front-end, a TLS-intercepting middlebox, or a spoofed decoy **cannot** derive the inner key and cannot read payload — confidentiality is end-to-end to the real endpoint, not to the TLS terminator.
+- **Independent Inner AEAD Layer (secret-salted)**: Inner bidirectional streams are sealed in ChaCha20-Poly1305 (RFC 8439) — with an AES-GCM path where hardware acceleration (AES-NI / ARMv8 Crypto) makes it cheaper — HKDF-SHA256 key derivation, independent per-direction sequence counters, and explicit framing. The inner key is derived from the session exporter **salted with the pre-shared `master_secret`** (`HKDF-Extract(salt = master_secret, ikm = exporter)`), so even an attacker who terminates both TLS legs — holding both per-leg exporters — cannot derive the inner key without the secret, and cannot bridge the tunnel.
+- **Post-Quantum Hybrid Key Exchange**: Hybrid post-quantum key agreement negotiated natively by the Chromium stack (X25519 + ML-KEM/Kyber), with graceful fallback to classical X25519.
+- **Constant-Time Verification & Replay Protection**: Token validation runs across all three time windows ($[-1, 0, +1]$) with `subtle.ConstantTimeCompare` and symmetrical dummy cache lookups; tokens are single-use against generational replay caches. No early-exit, no timing leak.
 
-### Camouflage & Anti-Censorship
+### Transport & Resilience
 
-- **Zero-Delay Transparent Fallback**: Unauthorized probes (scanners, random TLS ClientHellos, port checks) trigger an immediate, transparent TCP splice (`io.Copy`) to a designated decoy website (e.g. `microsoft.com:443`). Probes receive authentic decoy certificates and responses without dropped packets, custom alerts, or reset signatures.
-- **PaddedConn Initial Length Obfuscation**: The first 8 packets of every connection are framed with a 4-byte header and 16 to 63 bytes of high-entropy cryptographic padding ($H \ge 7.99\text{ bits/byte}$), flattening the packet size distribution spikes characteristic of initial handshakes.
-- **BurstShaper Dynamic Chunking**: Large data transfers are buffered and emitted in dynamic bursts ranging from 1 MB to 4 MB, closely replicating the variable segment sizes of legitimate DASH/HLS streaming media (e.g. YouTube, Netflix).
-- **Interactive Flush Timer with Jitter**: Interactive, low-volume traffic is flushed within an adaptive jitter window of 150 ms to 450 ms (`baseFlushTime = 300ms`), preventing flow latency correlation while preserving responsiveness.
-- **Cover Traffic & Adaptive Chaffing**: Inject dummy frames (marked with MSB `0x8000`) with ~15% probability during active writes, and automatically emit cover traffic when the connection is idle, blinding statistical traffic classifiers.
+- **Real MoQT Carrier over WebTransport-over-H3**: The tunnel is carried as genuine Media over QUIC Transport (draft-16) on an inline Chromium MoQT endpoint, inside a **per-session randomized namespace**. Reliable (TCP-like) flows map to reliable MoQT tracks; loss-tolerant (UDP) flows map to **QUIC datagrams (RFC 9221)**.
+- **Application-Layer FEC**: Datagram flows are protected by systematic forward error correction (XOR-2D → Reed-Solomon over GF(2⁸), NEON-accelerated), recovering losses at 0-RTT without retransmission; parity is adaptive-ready (BBRv3/ECN-driven).
+- **Connection Racing & Brokenness Tracking (Happy-Eyeballs)**: QUIC is preferred and raced against a TCP (`smux`) fallback; if UDP/QUIC is blackholed it falls back seamlessly, and a penalty tracker marks QUIC broken with exponential backoff (5 m → 10 m → 1 h) instead of re-racing every time.
+- **Connection Migration**: QUIC path migration (handover Wi-Fi↔cellular) keeps the tunnel alive across network changes without a full reconnect — MTU reset + DPLPMTUD re-probe + connection-ID rotation on migration.
+- **Sleep/Wake Keep-Alive**: Power-state-aware heartbeat (active / background / doze), kept strictly under the negotiated idle-timeout, with a high-priority wake resync ping and 0-RTT resumption on reconnect.
+- **Kernel-Level Network Optimization**: Automated Linux tuning — BBR congestion control, FQ pacing, disabled idle slow-start, 64 MiB socket buffers — plus server-side UDP GSO batch writing and ACK-frequency reduction.
 
-### Performance & Multiplexing
+### Camouflage & Anti-Censorship (engaged, understated)
 
-- **Dual-Lane Hybrid Session Pool**: Concurrently maintains parallel TCP (`smux`) and UDP (`QUIC`) lanes within an auto-healing connection pool (`SessionPool`).
-- **Dynamic Load Balancing & Failover**: Application streams are round-robin balanced across active lanes. If an ISP throttles or blackholes UDP (QUIC), traffic seamlessly falls back to TCP; if TCP stalls, QUIC absorbs the throughput.
-- **Auto-Healing Worker**: An asynchronous health worker monitors active lanes, prunes dead connections, and replenishes the connection pool without stalling active user sessions.
-- **Optimized UDP-over-TCP (UoT)**: Robust UDP packet framing over TCP streams with 2-byte length headers, MTU boundary clamping, and oversized packet protection.
-- **Kernel-Level Network Optimization**: Automated Linux kernel tuning configuring TCP BBR congestion control, FQ packet pacing, disabled idle slow-start, and 64 MiB socket buffer high-water marks.
+- **Zero-Delay Transparent Fallback**: Unauthorized probes (scanners, random ClientHellos, port checks) trigger an immediate, transparent splice (`io.Copy`) to a designated decoy site (e.g. `microsoft.com:443`). Probes receive authentic decoy certificates and responses — no dropped packets, custom alerts, or reset signatures.
+- **On-Demand Media Cover Service (Variant 3)**: The server co-hosts a real MoQ media service in a public (non-token-gated) namespace — a restreamed lo-fi/radio source (ffmpeg) or a synthetic source. An active prober that subscribes receives a genuine live media stream; the content source only starts when a real subscription arrives. Tunnel and cover share one MoQT dialect behind one `:443`/H3 front.
+- **PaddedConn Initial Length Obfuscation**: The first 8 packets are framed with a 4-byte header and 16–63 bytes of high-entropy padding ($H \ge 7.99$ bits/byte), flattening handshake size spikes.
+- **Adaptive Chaffing & DASH/HLS Shaping (fallback)**: Dummy frames (MSB `0x8000`) are injected (~15%) and emitted on idle to blind statistical classifiers; on the TCP-fallback lane, BurstShaper buffers bulk transfers into 1–4 MB bursts resembling DASH/HLS media.
 
 ### Deployment & Operational Modes
 
-- **Zero-Domain Fallback Mode (REALITY-Style)**: Operates without requiring a custom domain or TLS certificate. Authenticates incoming connections via TLS ClientHello SessionID and transparently forwards unauthenticated traffic to a legitimate donor site.
-- **Self-Hosted TLS Mode**: Directly terminates standard TLS using production certificates (e.g., Caddy, Let's Encrypt, custom PEM) with hardcoded ALPN (`h3`, `h2`, `http/1.1`).
-- **Caddy Shield Fronting (`caddy-eidolon-shield`)**: An enterprise Caddy v2 plugin providing Layer 4 SNI demultiplexing, HTTP/3 `X-Eidolon-Token` validation, decoy website serving, and an authenticated loopback secret rotation API (`/_internal/update_secret`).
-- **Federated Node Sync (Opora)**: Integrated client-node syncer that periodically pulls Ed25519-signed master secrets and dynamic configuration updates from an Opora orchestration controller.
+- **Zero-Domain Fallback Mode (REALITY-Style)**: Operates without a custom domain or certificate; unauthenticated traffic is transparently forwarded to a legitimate donor site.
+- **Self-Hosted TLS Mode**: Terminates standard TLS with production certificates (Caddy / Let's Encrypt / custom PEM), ALPN `h3`, `h2`, `http/1.1`.
+- **Caddy Shield Fronting (`caddy-eidolon-shield`)**: Caddy v2 plugin providing Layer-4 SNI/UDP demultiplexing (verbatim L4 relay of QUIC `:443` → the inline MoQT core), decoy website serving, and a loopback secret-rotation API.
+- **Federated Node Sync (Opora)**: Client-node syncer that periodically pulls Ed25519-signed master secrets and configuration from an Opora orchestration controller — the seed of the fleet management that **Weaver** will build out.
 
 ---
 
@@ -161,34 +183,35 @@ Eidolon was engineered from the ground up to neutralize every vector in this thr
 ### High-Level Data Flow
 
 ```
-[ Client Application (Browser / OS) ]
+[ Client Application (Browser / OS / VpnService) ]
                  │
                  ▼
      [ sing-box Eidolon Outbound ]
+                 │ (QUIC-preferred racing; TCP fallback on UDP blackhole)
+    ┌────────────┴────────────────────────────────────┐
+    ▼ (PRIMARY)                                        ▼ (FALLBACK)
+[ QUIC Carrier: Native Chromium WebTransport-over-H3 ]   [ TCP Lane: Native Chromium TLS 1.3 ]
+    │ Real MoQT (draft-16), per-session namespace          │ (SessionID Token Injection)
+    │ In-band token preamble on track "u"                  │ (smux + PaddedConn + BurstShaper)
+    │ Reliable tracks (streams) + QUIC datagrams + FEC     │
+    └────────────┬────────────────────────────────────────┘
                  │
-    ┌────────────┴───────────────────────────┐
-    ▼                                        ▼
-[ TCP Lane: Native Chromium TLS 1.3 ]    [ QUIC Lane: Native Chromium HTTP/3 ]
-    │ (SessionID Token Injection)            │ (X-Eidolon-Token + 32B Padding)
-    │ (PaddedConn Initial Obfuscation)       │ (QUIC Packet Obfuscation)
-    └────────────┬───────────────────────────┘
-                 │
-                 ▼ (Encrypted & Obfuscated Wire Traffic)
-          [ Censor / DPI ]
+                 ▼ (Encrypted & Obfuscated Wire Traffic — looks like H3/HTTPS)
+          [ Censor / DPI / On-Path Adversary ]
                  │
                  ▼
-     [ sing-box Eidolon Inbound ] ─────────(Unauthenticated Probe)──────┐
-                 │                                                      │
-                 │ (Constant-Time Token Validation: Valid)              │
-                 ▼                                                      ▼
-  [ TLS Handshake Termination & RFC 5705 Exporter ]           [ Zero-Delay Fallback ]
-                 │                                                      │
-                 ▼                                                      ▼
-  [ PaddedConn (8-packet cutoff) & BurstShaper ]              [ Decoy Host (e.g., ]
-                 │                                            [ microsoft.com:443) ]
+     [ Caddy Shield :443 — L4 verbatim relay (TCP+UDP) ]
+                 │ (SNI/flow match → inline core; else → decoy site)
                  ▼
-  [ ServerSessionManager (1.5s Pairing Window) ]
-                 │
+     [ sing-box Eidolon Inbound + inline MoQT server ] ──(Unauthenticated probe / cover sub)──┐
+                 │                                                                            │
+                 │ (Constant-Time, KeyShare-bound Token Validation: Valid)                    │
+                 ▼                                                                            ▼
+  [ RFC 5705 Exporter → Inner AEAD (E2E) ]                            ┌──────────────────────┴───────────┐
+                 │                                                    ▼                                   ▼
+                 ▼                                         [ Zero-Delay Fallback ]        [ On-Demand Cover Service ]
+  [ ServerSessionManager (lane pairing) ]                 [ → Decoy Host, e.g.  ]        [ public MoQ track: radio/  ]
+                 │                                         [   microsoft.com:443 ]        [ lo-fi (ffmpeg) or synth  ]
                  ▼
     [ sing-box Core Router (Direct / Outbound) ]
                  │
@@ -196,13 +219,34 @@ Eidolon was engineered from the ground up to neutralize every vector in this thr
             [ Internet ]
 ```
 
+The inner AEAD is end-to-end between the two Eidolon endpoints. The Caddy front performs **verbatim Layer-4 relay only** — it never terminates or decrypts the tunnel, so even a fully compromised front-end sees ciphertext bound to a session key it does not hold.
+
 ### Wire Protocol & Packet Specifications
 
 Eidolon standardizes on compact, deterministic binary frame formats across each layer of the protocol stack.
 
-#### 1. Initial Handshake Token Embedding (TLS ClientHello)
+#### 1. Carrier Authentication Preamble (primary — QUIC/MoQT)
 
-The authentication token is injected directly into the 32-byte `SessionId` field of the standard TLS 1.3 `ClientHello` packet generated by Chromium's BoringSSL stack:
+On the primary carrier, after the WebTransport-over-H3 handshake and MoQT session setup, the client writes an **in-band preamble** as the first bytes of the reliable `"u"` track. The server validates it before any traffic is accepted; the token is **not** carried in an HTTP header (the server never reads `x-eidolon-token`).
+
+```
++----------------------+----------------+----------------------+--------------+
+| Reliable Token (32B) | FlowID (16B)   | Datagram Token (32B) | PadLen (2B)  |
++----------------------+----------------+----------------------+--------------+
+```
+
+| Field | Length | Description |
+| :--- | :--- | :--- |
+| `Reliable Token` | 32 B | HMAC-SHA256(MasterSecret, TimeWindow ‖ KeyShare). Single-use, time-bound, KeyShare-bound. |
+| `FlowID` | 16 B | Random session identifier used by `ServerSessionManager` to pair the reliable and datagram lanes. |
+| `Datagram Token` | 32 B | Separate fresh token channel-bound to the exported session key (`keyShare = sessionKey`), authenticating the datagram lane. The reliable token cannot be reused (it is single-use). |
+| `PadLen` | 2 B | Trailing padding length (0 by default). |
+
+The datagram lane's cb_port is connected **eagerly** at carrier setup (while the single-use token is fresh, within its ~15 s window), not lazily on first datagram.
+
+#### 1b. Fallback Token Embedding (TCP lane — TLS ClientHello SessionId)
+
+When the QUIC/MoQT carrier is unavailable and Eidolon races to the TCP fallback lane, the token is injected into the 32-byte `SessionId` field of the TLS 1.3 `ClientHello` generated by Chromium's BoringSSL stack:
 
 ```
  0                   1                   2                   3
@@ -371,39 +415,40 @@ To counter website fingerprinting classifiers (e.g. Deep Fingerprinting):
 
 ---
 
-### Multi-Lane Hybrid Multiplexer (TCP + QUIC)
+### Hybrid Multiplexer (QUIC-preferred MoQT + TCP fallback)
 
-The client maintains an auto-healing connection pool (`SessionPool`) across both TCP and QUIC transports:
+The client maintains an auto-healing connection pool (`SessionPool`). The model is **browser-like**, not symmetric: one QUIC/MoQT carrier is preferred, with a TCP `smux` lane as Happy-Eyeballs fallback — not an evenly round-robined dual pool.
 
 ```
                          [ SessionPool ]
                                 │
-        ┌───────────────────────┴───────────────────────┐
-        ▼                                               ▼
-   [ tcpPool ]                                    [ quicPool ]
-   3x smux.Session (over Chromium TLS 1.3)        3x smux.Session (over Chromium HTTP/3)
-        │                                               │
-        └───────────────────────┬───────────────────────┘
-                                │ (Round-Robin Stream Dispatch)
+        ┌───────────────────────┴────────────────────────┐
+        ▼ (PRIMARY, maxQUICLanes = 1)                     ▼ (FALLBACK, maxTCPLanes = 3)
+   [ quicPool ]                                      [ tcpPool ]
+   MoQT carrier over Chromium WebTransport/H3        up to 3x smux.Session (Chromium TLS 1.3)
+   reliable tracks (u/d) + datagram tracks (ud/dd)   reliable streams (UDP-over-TCP for datagrams)
+        │                                                 │
+        └───────────────────────┬─────────────────────────┘
+                                │ (GetStreamPreferred: QUIC first, TCP fallback)
                                 ▼
-                       [ Application Stream ]
+                       [ Application Stream / Flow ]
 ```
 
-- **Round-Robin Balancing**: Active streams are balanced evenly across both pools (`atomic.AddUint32(&rrIndex, 1) % total`).
-- **UDP Blackhole Resilience**: If UDP is blocked by a firewall, QUIC dials fail gracefully and 100% of traffic routes over TCP without application hang.
-- **TCP Throttling Resilience**: If TCP is throttled, QUIC lanes absorb the load.
-- **Auto-Healing Worker (`CheckAndHeal`)**: Dead lanes are purged and background replenishment is initiated using atomic locking (`isDialing`).
-- **Server-Side Pairing**: `ServerSessionManager` maintains a 1.5-second pairing window upon receiving the first transport lane. If both lanes connect within the window, perfect pairing is achieved; otherwise, the session operates in degraded single-lane mode.
+- **Connection Racing (Happy-Eyeballs)**: QUIC Initial and TCP SYN are attempted together; QUIC answering first wins and TCP is dropped. Lane mix is dynamic: pure QUIC when healthy, 1/1 race while probing, pure TCP while QUIC is in backoff.
+- **Brokenness Tracker**: After a QUIC failure, QUIC is marked broken with exponential backoff (5 m → 10 m → 1 h) and not re-raced until it expires; this doubles as the "QUIC works for this endpoint" cache.
+- **UDP Blackhole Resilience**: If UDP is blocked, the QUIC dial fails gracefully and traffic routes over the TCP fallback without application hang.
+- **Auto-Healing Worker (`CheckAndHeal`)**: Dead lanes are purged and background replenishment runs under atomic locking (`isDialing`).
+- **Server-Side Pairing**: `ServerSessionManager` pairs the reliable and datagram lanes of a session by `FlowID`; an unpaired session operates in degraded single-lane mode.
 
 ---
 
 ### Caddy Shield Reverse Proxy Fronting
 
-For deployments leveraging [Caddy v2](https://caddyserver.com/), the `caddy-eidolon-shield` module acts as an intelligent security fronting layer:
+For deployments leveraging [Caddy v2](https://caddyserver.com/), the `caddy-eidolon-shield` module acts as an intelligent security fronting layer. In the current MoQT architecture the primary mechanism is a **verbatim Layer-4 relay** — Caddy never terminates or decrypts the tunnel:
 
-- **Layer 4 SNI Routing (`eidolon_l4`)**: Inspects TLS ClientHello records. Connections matching `proxy_domain` are transparently proxied to the Eidolon core, while all other SNIs pass to Caddy's standard HTTP pipeline.
-- **HTTP/3 Token Interception (`eidolon_shield`)**: Validates the `X-Eidolon-Token` header. Authorized requests have the token stripped and are proxied upstream; unauthorized requests fall through to serve legitimate website files (200 OK / 404).
-- **Zero-Downtime Secret Rotation**: Exposes an internal HTTP endpoint (`POST /_internal/update_secret`) bound to localhost (`127.0.0.1:11223`) allowing dynamic secret rotation without restarting Caddy.
+- **Layer 4 SNI/UDP Relay (`eidolon_l4`)** — *primary*: A listener wrapper on `:443` that inspects TLS ClientHello records (TCP) and relays QUIC on UDP `:443`. Connections matching `proxy_domain` are relayed byte-for-byte to the inline Eidolon MoQT core (`127.0.0.1:8443`); all other SNIs pass to Caddy's standard HTTP pipeline (the decoy site). Because the relay is verbatim, token validation and TLS/QUIC termination happen inside the Eidolon core, not in Caddy.
+- **HTTP Token Shield (`eidolon_shield`)** — *legacy/alternate*: An HTTP-reverse-proxy mode that validates an `X-Eidolon-Token` header and falls through to serve legitimate files for unauthorized requests. Retained for HTTP-fronted deployments; the MoQT carrier does **not** use a header token (authentication is the in-band carrier preamble).
+- **Secret Rotation**: An internal loopback endpoint allows dynamic secret rotation without restarting Caddy.
 
 ---
 
@@ -436,6 +481,16 @@ Eidolon configurations follow standard sing-box JSON syntax.
 | `federation.opora_url`| `string`| `""` | Endpoint URL of the Opora controller. |
 | `federation.token` | `string` | `""` | Bearer token for Opora API authentication. |
 | `federation.pub_key` | `string`| `""` | Ed25519 public key (hex) for verifying config signatures. |
+| `cover` | `object` | `nil` | On-demand MoQ cover service (public, non-token-gated namespace). |
+| `cover.enabled` | `bool` | `false` | Enable the cover service. A prober that subscribes to the public track gets a real media stream. |
+| `cover.source` | `string` | `"synthetic"` | Content source: `"ffmpeg"` (restream a radio/lo-fi URL → Opus/Ogg), `"synthetic"` (self-contained keystream), or `"none"`. |
+| `cover.input` | `string` | `""` | For `ffmpeg`: input stream URL or file (e.g. a public lo-fi/radio stream). |
+| `cover.ffmpeg_args` | `[]string` | `[]` | Verbatim ffmpeg arguments (overrides the default Opus/Ogg pipeline). |
+| `cover.track` | `string` | `"audio"` | Public track name advertised to subscribers. |
+| `cover.bitrate` | `int` | `12000` | Target bitrate (bytes/s; ~96 kbit/s). |
+| `cover.namespace_pool` | `[]string` | `[]` | Word pool for plausible per-session namespace names (empty = built-in). |
+
+> **Note (cover + ffmpeg):** `source: "ffmpeg"` requires the `ffmpeg` binary on the server and a `libeidolon.so` that includes the broadcaster-socket `FD_CLOEXEC` fix; otherwise an ffmpeg process can leak when a prober unsubscribes. Use `source: "synthetic"` (self-contained, no external process) if unsure. The bundled `deploy_eidolon_server.sh` provisions the cover service and defaults to an ffmpeg radio restream (overridable via `COVER_*` env vars).
 
 ### Outbound Configuration Options
 
@@ -767,26 +822,35 @@ sing-box-fork/
 │   └── sing-box/              # Main executable entrypoint
 ├── protocol/
 │   └── eidolon/               # Core Eidolon Protocol Implementation
-│       ├── aead.go            # Inner ChaCha20-Poly1305 framing & adaptive chaff
+│       ├── aead.go            # Inner ChaCha20-Poly1305 / AES-GCM framing & adaptive chaff
 │       ├── bridge.go          # CGO bridge (POSIX socketpair & Windows loopback)
-│       ├── bridge.h           # C++ header exports (eidolon_dial_tcp, etc.)
-│       ├── crypto.go          # TOTP constant-time token verification & replay cache
-│       ├── exporter.go        # RFC 5705 TLS Exporter ("eidolon-traffic-key")
+│       ├── bridge.h           # C++ header exports (eidolon_dial_moqt, cover, power, etc.)
+│       ├── crypto.go          # Constant-time, KeyShare-bound token verification & replay cache
+│       ├── exporter.go        # RFC 5705 TLS/QUIC Exporter ("eidolon-traffic-key")
 │       ├── inbound.go         # Inbound server, zero-delay fallback, TLS config
-│       ├── inbound_mux.go     # ServerSessionManager & 1.5s pairing lifecycle
-│       ├── inbound_quic.go    # Native Chromium QUIC listener & HTTP/3 CONNECT
-│       ├── outbound.go        # Outbound client, SessionPool & auto-healing
+│       ├── inbound_mux.go     # ServerSessionManager & lane pairing lifecycle
+│       ├── inbound_quic.go    # Native Chromium QUIC/MoQT listener
+│       ├── inbound_datagram.go# Server datagram lane (channel-bound token, cb_port)
+│       ├── outbound.go        # Outbound client, SessionPool, racing, brokenness tracker, migration
+│       ├── datagram.go        # QUIC datagram lane (RFC 9221) framing
+│       ├── datagram_fec.go    # FEC wiring over the datagram wire (idle-flush, block IDs)
+│       ├── datagram_flowctl.go# Datagram flow control
+│       ├── datagram_dplpmtud.go# DPLPMTUD / path-MTU for datagrams
+│       ├── cover_ingest.go    # Phase 6 cover service: on-demand source → native broadcaster
 │       ├── padding.go         # PaddedConn (4-byte header, 8-packet cutoff)
-│       ├── shaper.go          # BurstShaperConn (1-4MB chunking, flush jitter)
+│       ├── shaper.go          # BurstShaperConn (1-4MB chunking, flush jitter — TCP fallback)
 │       ├── sysctl.go          # Kernel BBR & FQ pacing tuning
 │       ├── uot.go             # UDP-over-TCP stream encapsulation
+│       ├── cover/             # Cover content sources (synthetic keystream, ffmpeg restream)
+│       ├── fec/               # App-layer FEC (XOR-2D + Reed-Solomon, GF(2⁸)+NEON)
+│       ├── flowctl/           # Receiver-driven flow control & ECN-bleaching detector
 │       ├── federation/        # Opora node syncer & Ed25519 signature validation
 │       └── lib/
-│           ├── libeidolon.so  # Compiled native Chromium network stack
+│           ├── libeidolon.so  # Compiled native Chromium network stack (incl. inline MoQT server)
 │           └── libeidolon_net.so -> libeidolon.so
-├── caddy-eidolon-shield/      # Caddy v2 security fronting & L4 SNI module
-│   ├── eidolon_shield.go      # HTTP/3 token validation & secret rotation API
-│   └── eidolon_l4.go          # Layer 4 SNI demuxer & transparent proxy
+├── caddy-eidolon-shield/      # Caddy v2 security fronting & L4 relay module
+│   ├── eidolon_shield.go      # (legacy) HTTP token validation & secret rotation API
+│   └── eidolon_l4.go          # Layer-4 SNI/UDP verbatim relay → inline MoQT core
 ├── option/
 │   ├── inbound_eidolon.go     # Inbound configuration options
 │   └── outbound_eidolon.go    # Outbound configuration options
